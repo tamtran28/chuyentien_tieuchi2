@@ -1,293 +1,222 @@
-
 import io
 import re
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Mục 18 - GTCG Toolkit", layout="wide")
+st.set_page_config(page_title="Mục 18 – GTCG", layout="wide")
+st.title("📘 Mục 18 – GTCG (Streamlit)")
+st.caption("Tải 2 file Excel (.xlsx) rồi bấm **Xử lý**. Kết quả sẽ có 2 sheet: tieu chi 1,2 & tieu chi 3.")
 
-st.title("📘 Mục 18 - GTCG: Xử lý & Tổng hợp")
-st.caption("Giữ nguyên kiểu dữ liệu khi import (đặc biệt ACC_NO), xuất Excel 2 sheet.")
+# Bắt buộc openpyxl để đọc .xlsx
+try:
+    import openpyxl  # noqa
+except Exception:
+    st.error("Thiếu thư viện **openpyxl**. Cài: `pip install openpyxl`")
+    st.stop()
 
-# =============== Helpers ===============
-
-def read_excel_keep_text(uploaded_file, force_acc_no_text=True):
-    """Đọc Excel và giữ nguyên dữ liệu. Nếu force_acc_no_text=True thì ACC_NO luôn dạng text."""
-    if uploaded_file is None:
-        return None
+# ------------------------- Helpers -------------------------
+def read_xlsx(uploaded_file, label):
+    if not uploaded_file:
+        st.error(f"Thiếu file: {label}")
+        st.stop()
+    if not uploaded_file.name.lower().endswith(".xlsx"):
+        st.error(f"{label} phải là .xlsx")
+        st.stop()
     try:
-        if force_acc_no_text:
-            df = pd.read_excel(uploaded_file, dtype={'ACC_NO': str})
-            # Chuẩn hoá ACC_NO để tránh NaN -> 'nan' hoặc float -> '123.0'
-            if 'ACC_NO' in df.columns:
-                df['ACC_NO'] = df['ACC_NO'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-        else:
-            df = pd.read_excel(uploaded_file)  # để pandas tự suy đoán dtype
-        return df
+        return pd.read_excel(uploaded_file, engine="openpyxl")
     except Exception as e:
-        st.error(f"Lỗi đọc Excel: {e}")
-        return None
+        st.error(f"Lỗi đọc {label}: {e}")
+        st.stop()
 
-def ensure_datetime(series):
-    try:
-        return pd.to_datetime(series, errors='coerce')
-    except Exception:
-        return pd.to_datetime(series.astype(str), errors='coerce')
+def process_ttk(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """Sheet 1: Tiêu chí 1,2 (dựa trên file GTCG 1)."""
+    df = df_raw.copy()
 
-# =============== Phần 1: Tiêu chí in hỏng / hết dòng (TTK) ===============
+    # Đảm bảo ACC_NO là text
+    if "ACC_NO" in df.columns:
+        df["ACC_NO"] = df["ACC_NO"].astype(str)
 
-def process_ttk(df):
-    """Triển khai logic mục 2.3.2 theo đoạn code của bạn."""
-    df = df.copy()
+    # Chuẩn hóa ngày
+    df["INVT_TRAN_DATE"] = pd.to_datetime(df["INVT_TRAN_DATE"], errors="coerce")
+    df.sort_values(["INVT_SRL_NUM"], ascending=True, inplace=True, na_position="last")
+    df.reset_index(drop=True, inplace=True)
 
-    # Định dạng cột
-    if 'ACC_NO' in df.columns:
-        df['ACC_NO'] = df['ACC_NO'].astype(str).str.strip()
-
-    if 'INVT_TRAN_DATE' in df.columns:
-        df['INVT_TRAN_DATE'] = ensure_datetime(df['INVT_TRAN_DATE'])
-
-    # Sắp xếp theo INVT_SRL_NUM nếu có
-    if 'INVT_SRL_NUM' in df.columns:
-        df.sort_values(by='INVT_SRL_NUM', ascending=True, inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-    # (1) Số lần in hỏng
-    # Điều kiện: PASSBOOK_STATUS == 'F' và INVT_LOCN_CODE_TO == 'IS'
-    failure_mask = (
-        df.get('PASSBOOK_STATUS', pd.Series(False, index=df.index)).eq('F') &
-        df.get('INVT_LOCN_CODE_TO', pd.Series('', index=df.index)).eq('IS')
+    # (1) Số lần in hỏng: PASSBOOK_STATUS='F' & INVT_LOCN_CODE_TO='IS'
+    failure_mask = (df["PASSBOOK_STATUS"] == "F") & (df["INVT_LOCN_CODE_TO"] == "IS")
+    fail_counts = (
+        df.loc[failure_mask, "ACC_NO"].value_counts()
+        .rename_axis("ACC_NO")
+        .reset_index(name="Số lần in hỏng")
     )
-    total_failure_counts = df.loc[failure_mask, 'ACC_NO'].map(df.loc[failure_mask, 'ACC_NO'].value_counts())
-    df['Số lần in hỏng'] = total_failure_counts.fillna(0).astype(int)
+    df = df.merge(fail_counts, on="ACC_NO", how="left")
+    df["Số lần in hỏng"] = df["Số lần in hỏng"].fillna(0).astype(int)
 
-    # (2) TTK in hỏng nhiều lần trong 01 ngày
-    df['TTK in hỏng nhiều lần trong 01 ngày'] = ''
-    if df['INVT_TRAN_DATE'].notna().any():
-        daily_failure_counts = df[failure_mask].groupby(['ACC_NO', df['INVT_TRAN_DATE'].dt.date]).transform('size')
-        df['daily_failures'] = daily_failure_counts
-        df['TTK in hỏng nhiều lần trong 01 ngày'] = np.where(df['daily_failures'] >= 2, 'X', '')
-        df.drop(columns=['daily_failures'], inplace=True, errors='ignore')
-
-    # Chuẩn bị cột ngày
-    df['INVT_TRAN_DATE'] = ensure_datetime(df['INVT_TRAN_DATE'])
-    df['TRAN_DATE_ONLY'] = df['INVT_TRAN_DATE'].dt.date
-
-    # (3) Số lần in hết dòng
-    hetdong_mask = (
-        df.get('PASSBOOK_STATUS', pd.Series('', index=df.index)).eq('U') &
-        df.get('INVT_LOCN_CODE_TO', pd.Series('', index=df.index)).eq('IS')
+    # (2) TTK in hỏng nhiều lần trong 01 ngày (>=2 trong cùng ngày)
+    df["DATE_ONLY"] = df["INVT_TRAN_DATE"].dt.date
+    daily_fail = (
+        df.loc[failure_mask]
+        .groupby(["ACC_NO", "DATE_ONLY"])
+        .size()
+        .reset_index(name="daily_fail_cnt")
     )
-    df['Số lần in hết dòng'] = df.loc[hetdong_mask, 'ACC_NO'].map(
-        df.loc[hetdong_mask, 'ACC_NO'].value_counts()
-    ).fillna(0).astype(int)
-
-    # (4) TTK in hết dòng nhiều lần trong 01 ngày
-    df['TTK in hết dòng nhiều lần trong 01 ngày'] = ''
-    try:
-        df['daily_het_dong'] = df[hetdong_mask].groupby(
-            ['ACC_NO', 'TRAN_DATE_ONLY']
-        )['ACC_NO'].transform('count')
-        df['TTK in hết dòng nhiều lần trong 01 ngày'] = np.where(df['daily_het_dong'] >= 2, 'X', '')
-    except Exception:
-        pass
-    df.drop(columns=['daily_het_dong'], inplace=True, errors='ignore')
-
-    # (5) TTK vừa in hỏng vừa in hết dòng trong 01 ngày
-    df_temp = df.groupby(['ACC_NO', 'TRAN_DATE_ONLY']).agg({
-        'Số lần in hỏng': 'sum',
-        'Số lần in hết dòng': 'sum'
-    }).reset_index()
-    df_temp['TTK vừa in hỏng vừa in hết dòng trong 01 ngày'] = np.where(
-        (df_temp['Số lần in hỏng'] > 0) & (df_temp['Số lần in hết dòng'] > 0), 'X', ''
+    df = df.merge(daily_fail, on=["ACC_NO", "DATE_ONLY"], how="left")
+    df["TTK in hỏng nhiều lần trong 01 ngày"] = np.where(
+        df["daily_fail_cnt"].fillna(0) >= 2, "X", ""
     )
-    df = pd.merge(
-        df,
-        df_temp[['ACC_NO', 'TRAN_DATE_ONLY', 'TTK vừa in hỏng vừa in hết dòng trong 01 ngày']],
-        on=['ACC_NO', 'TRAN_DATE_ONLY'],
-        how='left'
+    df.drop(columns=["daily_fail_cnt"], inplace=True)
+
+    # (3) Số lần in hết dòng: PASSBOOK_STATUS='U' & INVT_LOCN_CODE_TO='IS'
+    hetdong_mask = (df["PASSBOOK_STATUS"] == "U") & (df["INVT_LOCN_CODE_TO"] == "IS")
+    hetdong_counts = (
+        df.loc[hetdong_mask, "ACC_NO"].value_counts()
+        .rename_axis("ACC_NO")
+        .reset_index(name="Số lần in hết dòng")
+    )
+    df = df.merge(hetdong_counts, on="ACC_NO", how="left")
+    df["Số lần in hết dòng"] = df["Số lần in hết dòng"].fillna(0).astype(int)
+
+    # (4) TTK in hết dòng nhiều lần trong 01 ngày (>=2)
+    daily_het = (
+        df.loc[hetdong_mask]
+        .groupby(["ACC_NO", "DATE_ONLY"])
+        .size()
+        .reset_index(name="daily_het_cnt")
+    )
+    df = df.merge(daily_het, on=["ACC_NO", "DATE_ONLY"], how="left")
+    df["TTK in hết dòng nhiều lần trong 01 ngày"] = np.where(
+        df["daily_het_cnt"].fillna(0) >= 2, "X", ""
+    )
+    df.drop(columns=["daily_het_cnt"], inplace=True)
+
+    # (5) Vừa in hỏng vừa in hết dòng trong 01 ngày
+    mix = (
+        df.groupby(["ACC_NO", "DATE_ONLY"])
+        .agg(**{
+            "sum_hong": ("Số lần in hỏng", "sum"),
+            "sum_het": ("Số lần in hết dòng", "sum"),
+        })
+        .reset_index()
+    )
+    mix["TTK vừa in hỏng vừa in hết dòng trong 01 ngày"] = np.where(
+        (mix["sum_hong"] > 0) & (mix["sum_het"] > 0), "X", ""
+    )
+    df = df.merge(
+        mix[["ACC_NO", "DATE_ONLY", "TTK vừa in hỏng vừa in hết dòng trong 01 ngày"]],
+        on=["ACC_NO", "DATE_ONLY"],
+        how="left",
     )
 
-    # Định dạng lại ngày (mm/dd/yyyy) theo code gốc
-    df['INVT_TRAN_DATE'] = pd.to_datetime(df['INVT_TRAN_DATE'], errors='coerce').dt.strftime('%m/%d/%Y')
+    # Format ngày
+    df["INVT_TRAN_DATE"] = df["INVT_TRAN_DATE"].dt.strftime("%m/%d/%Y")
+    df.drop(columns=["DATE_ONLY"], inplace=True)
 
-    # Xoá cột phụ nếu không cần
-    df.drop(columns=['TRAN_DATE_ONLY'], inplace=True, errors='ignore')
     return df
 
-# =============== Phần 2: Phát hành / In hỏng theo TBL (Mục 18_2205_GTCG1) ===============
 
-def extract_tbl(series, prefix_tbl):
-    pattern = rf'({re.escape(prefix_tbl)}[^\s/]*)'
-    return series.astype(str).str.extract(pattern)[0]
+def process_phoi(df_raw: pd.DataFrame, sol_code: str) -> pd.DataFrame:
+    """Sheet 2: Tiêu chí 3 (dựa trên file GTCG 2)."""
+    df = df_raw.copy()
 
-def process_phoi(df, sol_kiem_toan):
-    """Triển khai các tiêu chí (1)-(6) như code bạn."""
-    df = df.copy()
+    # Tạo TBL từ INVT_XFER_PARTICULAR theo prefix {sol}G...
+    prefix_tbl = f"{sol_code}G"
+    pattern = rf"({re.escape(prefix_tbl)}[^\s/]*)"
+    df["TBL"] = df["INVT_XFER_PARTICULAR"].astype(str).str.extract(pattern)[0]
 
-    prefix_tbl = f"{sol_kiem_toan}G"
-    df['TBL'] = extract_tbl(df['INVT_XFER_PARTICULAR'].astype(str), prefix_tbl)
+    # (1) Phôi hỏng không gắn số:
+    # INVT_LOCN_CODE_TO chứa FAIL/FAIL PRINT và INVT_XFER_PARTICULAR không chứa prefix
+    df["Phôi hỏng không gắn số"] = (
+        df["INVT_LOCN_CODE_TO"].astype(str).str.contains("FAIL PRINT|FAIL", na=False)
+        & ~df["INVT_XFER_PARTICULAR"].astype(str).str.contains(prefix_tbl, na=False)
+    ).map({True: "X", False: ""})
 
-    # (1) Phôi hỏng không gắn số
-    df['(1) Phôi hỏng không gắn số'] = (
-        (df.get('INVT_LOCN_CODE_TO', pd.Series('', index=df.index)) == 'IS') &
-        ~df['INVT_XFER_PARTICULAR'].astype(str).str.contains(prefix_tbl, na=False)
-    ).map({True: 'X', False: ''})
+    # (2) Số lần phát hành: INVT_LOCN_CODE_TO='IS' và có TBL
+    mask_ph = (df["INVT_LOCN_CODE_TO"] == "IS") & (df["TBL"].notna())
+    ph_counts = df.loc[mask_ph, "TBL"].value_counts().to_dict()
+    df["Số lần phát hành"] = df["TBL"].map(ph_counts).fillna(0).astype(int)
 
-    # (2) Số lần phát hành
-    mask_ph = (
-        (df.get('INVT_LOCN_CODE_TO', pd.Series('', index=df.index)) == 'IS') &
-        (df['TBL'].notna())
+    # Ngày rút gọn
+    df["INVT_TRAN_DATE_ONLY"] = pd.to_datetime(df["INVT_TRAN_DATE"], errors="coerce").dt.date
+
+    # (3) PH nhiều lần trong 1 ngày: IS và (TBL, DATE) có >=2
+    df["PH nhiều lần trong 1 ngày"] = ""
+    df_is = df[df["INVT_LOCN_CODE_TO"] == "IS"].copy()
+    count_tbl_date = (
+        df_is.groupby(["TBL", "INVT_TRAN_DATE_ONLY"]).size().reset_index(name="cnt")
     )
-    df_ph = df[mask_ph]
-    ph_counts = df_ph['TBL'].value_counts().to_dict()
-    df['(2) Số lần phát hành'] = df['TBL'].map(ph_counts).fillna(0).astype(int)
-
-    # (3) PH nhiều lần trong 1 ngày
-    df['(3) PH nhiều lần trong 1 ngày'] = ''
-    df['INVT_TRAN_DATE_ONLY'] = ensure_datetime(df['INVT_TRAN_DATE']).dt.date
-    mask_ph_2plus = df['(2) Số lần phát hành'] >= 2
-    try:
-        df.loc[mask_ph_2plus, '(3) PH nhiều lần trong 1 ngày'] = (
-            df[mask_ph_2plus]
-            .groupby(['TBL', 'INVT_TRAN_DATE_ONLY'], group_keys=False)
-            .apply(lambda g: pd.Series(['X'] * len(g), index=g.index))
+    keys_multi = set(
+        zip(
+            count_tbl_date.loc[count_tbl_date["cnt"] >= 2, "TBL"],
+            count_tbl_date.loc[count_tbl_date["cnt"] >= 2, "INVT_TRAN_DATE_ONLY"],
         )
-    except Exception:
-        pass
-
-    # (4) Số lần in hỏng
-    mask_hong = (
-        df.get('INVT_LOCN_CODE_TO', pd.Series('', index=df.index)).isin(['FAIL', 'FAIL PRINT']) &
-        df['TBL'].notna()
     )
-    df_hong = df[mask_hong]
-    hong_counts = df_hong['TBL'].value_counts().to_dict()
-    df['(4) Số lần in hỏng'] = df['TBL'].map(hong_counts).fillna(0).astype(int)
+    df.loc[
+        df.apply(lambda r: (r["INVT_LOCN_CODE_TO"] == "IS") and ((r["TBL"], r["INVT_TRAN_DATE_ONLY"]) in keys_multi), axis=1),
+        "PH nhiều lần trong 1 ngày"
+    ] = "X"
 
-    # (5) In hỏng nhiều lần trong 1 ngày
-    df['(5) In hỏng nhiều lần trong 1 ngày'] = ''
-    mask_hong_2plus = df['(4) Số lần in hỏng'] >= 2
-    try:
-        df.loc[mask_hong_2plus, '(5) In hỏng nhiều lần trong 1 ngày'] = (
-            df[mask_hong_2plus]
-            .groupby(['TBL', 'INVT_TRAN_DATE_ONLY'], group_keys=False)
-            .apply(lambda g: pd.Series(['X'] * len(g), index=g.index))
-        )
-    except Exception:
-        pass
+    # (4) Số lần in hỏng (FAIL/FAIL PRINT) theo TBL
+    mask_hong = df["INVT_LOCN_CODE_TO"].isin(["FAIL", "FAIL PRINT"]) & df["TBL"].notna()
+    hong_counts = df.loc[mask_hong, "TBL"].value_counts().to_dict()
+    df["Số lần in hỏng"] = df["TBL"].map(hong_counts).fillna(0).astype(int)
+
+    # (5) In hỏng nhiều lần trong 1 ngày:
+    # yêu cầu: INVT_LOCN_CODE_TO = 'FAIL PRINT' & Số lần in hỏng >= 2
+    df["(5) In hỏng nhiều lần trong 1 ngày"] = ""
+    mask_hong_2 = (df["INVT_LOCN_CODE_TO"] == "FAIL PRINT") & (df["Số lần in hỏng"] >= 2)
+    groups = (
+        df.loc[mask_hong_2]
+        .groupby(["TBL", "INVT_TRAN_DATE_ONLY"])
+        .filter(lambda g: len(g) >= 2)
+    )
+    df.loc[groups.index, "(5) In hỏng nhiều lần trong 1 ngày"] = "X"
 
     # (6) PH nhiều lần + có in hỏng
-    df['(6) PH nhiều lần + có in hỏng'] = df.apply(
-        lambda row: 'X' if (
-            row['(3) PH nhiều lần trong 1 ngày'] == 'X' and (
-                row['(1) Phôi hỏng không gắn số'] == 'X' or row['(4) Số lần in hỏng'] >= 1
-            )
-        ) else '',
-        axis=1
+    df["PH nhiều lần + có in hỏng"] = np.where(
+        (df["Số lần phát hành"] > 1) & (df["Số lần in hỏng"] > 0), "X", ""
     )
 
-    # Xoá cột phụ
-    df.drop(columns=['INVT_TRAN_DATE_ONLY', 'TBL'], inplace=True, errors='ignore')
+    # Bỏ cột tạm
+    df.drop(columns=["INVT_TRAN_DATE_ONLY", "TBL"], inplace=True)
+
     return df
 
-# =============== UI ===============
 
-st.subheader("1) Nhập dữ liệu")
-
+# ------------------------- UI -------------------------
 c1, c2 = st.columns(2)
 with c1:
-    st.markdown("**File TTK (ví dụ: Muc18_1403_GTCG.xlsx)**")
-    file_ttk = st.file_uploader("Chọn 1 file TTK", type=['xlsx'], key="ttk")
-    ttk_force_text = st.checkbox("Luôn đọc ACC_NO dạng text (khuyến nghị)", value=True)
+    file_gtcg1 = st.file_uploader("GTCG 1 (.xlsx) — ví dụ: MUC 18 GTCG 1 1201 1.xlsx", type=["xlsx"])
 with c2:
-    st.markdown("**File PHÔI (ví dụ: Muc18_2205_GTCG1_*.xlsx)**")
-    files_phoi = st.file_uploader("Chọn 1 hoặc nhiều file PHÔI", type=['xlsx'], accept_multiple_files=True, key="phoi")
-    sol_kiem_toan = st.text_input("Mã SOL kiểm toán (ví dụ 2205)", value="2205")
+    file_gtcg2 = st.file_uploader("GTCG 2 (.xlsx) — ví dụ: MUC 18 GTCG 2 1201 1.xlsx", type=["xlsx"])
 
-run = st.button("▶️ Chạy xử lý")
+sol_code = st.text_input("Nhập mã SOL kiểm toán (ví dụ: 1201)", value="1201").strip()
+run = st.button("▶️ Xử lý", type="primary")
 
+# ------------------------- RUN -------------------------
 if run:
-    out_buffers = {}
+    df1 = read_xlsx(file_gtcg1, "GTCG 1")
+    df2 = read_xlsx(file_gtcg2, "GTCG 2")
 
-    # ---- Phần 1: TTK ----
-    df_ttk = read_excel_keep_text(file_ttk, force_acc_no_text=ttk_force_text) if file_ttk else None
-    if df_ttk is not None:
-        df_ttk_out = process_ttk(df_ttk)
-        st.success("✔️ Hoàn thành phần TTK (2.3.2)")
-        st.dataframe(df_ttk_out.head(200))
+    # Sheet 1
+    ttk = process_ttk(df1)
+    # Sheet 2
+    phoi = process_phoi(df2, sol_code)
 
-        bio = io.BytesIO()
-        with pd.ExcelWriter(bio, engine='openpyxl') as writer:
-            df_ttk_out.to_excel(writer, sheet_name='tieu chi 1,2', index=False)
-        out_buffers['TTK_only.xlsx'] = bio.getvalue()
-    else:
-        st.info("Bỏ qua phần TTK vì chưa chọn file.")
+    st.subheader("📄 Kết quả – Tiêu chí 1,2")
+    st.dataframe(ttk.head(100), use_container_width=True)
 
-    # ---- Phần 2: PHÔI ----
-    if files_phoi:
-        df_list = []
-        for f in files_phoi:
-            df_i = pd.read_excel(f, dtype=None)  # giữ nguyên dtype gốc do Excel cung cấp
-            # Đảm bảo cột ngày có thể xử lý
-            if 'INVT_TRAN_DATE' in df_i.columns:
-                df_i['INVT_TRAN_DATE'] = ensure_datetime(df_i['INVT_TRAN_DATE'])
-            df_list.append(df_i)
-        df_phoi_raw = pd.concat(df_list, ignore_index=True) if len(df_list) > 1 else df_list[0]
+    st.subheader("📄 Kết quả – Tiêu chí 3")
+    st.dataframe(phoi.head(100), use_container_width=True)
 
-        df_phoi_out = process_phoi(df_phoi_raw, sol_kiem_toan=sol_kiem_toan.strip())
-        st.success("✔️ Hoàn thành phần PHÔI (1)-(6)")
-        st.dataframe(df_phoi_out.head(200))
+    # Xuất Excel 2 sheet
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        ttk.to_excel(writer, sheet_name="tieu chi 1,2", index=False)
+        phoi.to_excel(writer, sheet_name="tieu chi 3", index=False)
 
-        bio2 = io.BytesIO()
-        with pd.ExcelWriter(bio2, engine='openpyxl') as writer:
-            # Nếu có cả TTK lẫn PHÔI: theo yêu cầu xuất 2 sheet
-            if 'TTK_only.xlsx' in out_buffers:
-                # Sheet 1: TTK
-                pd.read_excel(io.BytesIO(out_buffers['TTK_only.xlsx'])).to_excel(writer, sheet_name='tieu chi 1,2', index=False)
-                # Sheet 2: PHÔI
-                df_phoi_out.to_excel(writer, sheet_name='tieu chi 3', index=False)
-            else:
-                # Chỉ PHÔI
-                df_phoi_out.to_excel(writer, sheet_name='tieu chi 3', index=False)
-        out_buffers['Phoi_the_output.xlsx'] = bio2.getvalue()
-    else:
-        st.info("Bỏ qua phần PHÔI vì chưa chọn file.")
-
-    # ---- Gộp xuất một file chung nếu có đủ ----
-    if 'TTK_only.xlsx' in out_buffers and 'Phoi_the_output.xlsx' in out_buffers:
-        st.download_button("⬇️ Tải Excel (2 sheet: TTK & PHÔI)",
-                           data=out_buffers['Phoi_the_output.xlsx'],
-                           file_name="Muc18_TTK_PHOI.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    # Xuất riêng từng phần nếu có
-    if 'TTK_only.xlsx' in out_buffers:
-        st.download_button("⬇️ Tải Excel TTK (tieu chi 1,2)",
-                           data=out_buffers['TTK_only.xlsx'],
-                           file_name="TTK_only.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    if 'Phoi_the_output.xlsx' in out_buffers:
-        st.download_button("⬇️ Tải Excel PHÔI (tieu chi 3)",
-                           data=out_buffers['Phoi_the_output.xlsx'],
-                           file_name="Phoi_the_output.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-st.divider()
-with st.expander("📦 Yêu cầu môi trường / Gợi ý chạy"):
-    st.markdown("""
-    **Cài đặt:**
-    ```bash
-    pip install streamlit pandas numpy openpyxl
-    ```
-
-    **Chạy ứng dụng:**
-    ```bash
-    streamlit run app.py
-    ```
-
-    **Ghi chú giữ nguyên kiểu dữ liệu:**
-    - Mặc định phần PHÔI dùng `dtype=None` để giữ kiểu pandas suy luận từ Excel.
-    - Riêng `ACC_NO` (TTK) thường cần giữ **text** để không mất số 0 đầu. Bật checkbox *"Luôn đọc ACC_NO dạng text"*.
-    - Các cột ngày sẽ được chuyển sang `datetime` nội bộ để tính, nhưng xuất ra Excel vẫn hiển thị chuẩn.
-    """)
+    st.download_button(
+        "⬇️ Tải file kết quả (Phoi_the.xlsx)",
+        data=out.getvalue(),
+        file_name="Phoi_the.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )

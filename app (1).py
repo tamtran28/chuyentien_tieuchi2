@@ -130,7 +130,7 @@ mix['TTK vừa in hỏng vừa in hết dòng trong 01 ngày'] = np.where(
     'X', ''
 )
 
-# Merge kết quả này vào lại bảng chính
+# Merge kết quả vào lại bảng chính
 df = pd.merge(
     df,
     mix[['ACC_NO', 'DATE_ONLY', 'TTK vừa in hỏng vừa in hết dòng trong 01 ngày']],
@@ -138,13 +138,13 @@ df = pd.merge(
     how='left'
 )
 
-# Xóa cột ngày phụ
+# Xoá cột ngày phụ
 df.drop(columns=['DATE_ONLY'], inplace=True)
 
-# Nếu cần: định dạng lại cột ngày xuất cho đẹp
+# Format lại cột ngày nếu cần
 df['INVT_TRAN_DATE'] = df['INVT_TRAN_DATE'].dt.strftime('%m/%d/%Y')
-
 return df
+
 
 def process_phoi(df_raw: pd.DataFrame, sol_code: str) -> pd.DataFrame:
     """Sheet 2: Tiêu chí 3 (dựa trên file GTCG 2)."""

@@ -143,6 +143,7 @@ df.drop(columns=['DATE_ONLY'], inplace=True)
 
 # Format lại cột ngày nếu cần
 df['INVT_TRAN_DATE'] = df['INVT_TRAN_DATE'].dt.strftime('%m/%d/%Y')
+
 return df
 
 

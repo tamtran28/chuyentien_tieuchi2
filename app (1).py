@@ -90,61 +90,29 @@ def process_ttk(df_raw: pd.DataFrame) -> pd.DataFrame:
     df.drop(columns=["daily_het_cnt"], inplace=True)
 
     # # (5) Vừa in hỏng vừa in hết dòng trong 01 ngày
-    # mix = (
-    #     df.groupby(["ACC_NO", "DATE_ONLY"])
-    #     .agg(**{
-    #         "sum_hong": ("Số lần in hỏng", "sum"),
-    #         "sum_het": ("Số lần in hết dòng", "sum"),
-    #     })
-    #     .reset_index()
-    # )
-    # mix["TTK vừa in hỏng vừa in hết dòng trong 01 ngày"] = np.where(
-    #     (mix["sum_hong"] > 0) & (mix["sum_het"] > 0), "X", ""
-    # )
-    # df = df.merge(
-    #     mix[["ACC_NO", "DATE_ONLY", "TTK vừa in hỏng vừa in hết dòng trong 01 ngày"]],
-    #     on=["ACC_NO", "DATE_ONLY"],
-    #     how="left",
-    # )
+    mix = (
+        df.groupby(["ACC_NO", "DATE_ONLY"])
+        .agg(**{
+            "sum_hong": ("Số lần in hỏng", "sum"),
+            "sum_het": ("Số lần in hết dòng", "sum"),
+        })
+        .reset_index()
+    )
+    mix["TTK vừa in hỏng vừa in hết dòng trong 01 ngày"] = np.where(
+        (mix["sum_hong"] > 0) & (mix["sum_het"] > 0), "X", ""
+    )
+    df = df.merge(
+        mix[["ACC_NO", "DATE_ONLY", "TTK vừa in hỏng vừa in hết dòng trong 01 ngày"]],
+        on=["ACC_NO", "DATE_ONLY"],
+        how="left",
+    )
 
-    # # Format ngày
-    # df["INVT_TRAN_DATE"] = df["INVT_TRAN_DATE"].dt.strftime("%m/%d/%Y")
-    # df.drop(columns=["DATE_ONLY"], inplace=True)
+    # Format ngày
+    df["INVT_TRAN_DATE"] = df["INVT_TRAN_DATE"].dt.strftime("%m/%d/%Y")
+    df.drop(columns=["DATE_ONLY"], inplace=True)
 
-    # return df
-# (5) Vừa in hỏng vừa in hết dòng trong 01 ngày
+    return df
 
-# Gộp dữ liệu in hỏng và in hết dòng theo tài khoản và ngày
-mix = (
-    df.groupby(['ACC_NO', 'DATE_ONLY'])
-    .agg({
-        'Số lần in hỏng': 'sum',
-        'Số lần in hết dòng': 'sum'
-    })
-    .reset_index()
-)
-
-# Đánh dấu trường hợp vừa in hỏng vừa in hết dòng trong 01 ngày
-mix['TTK vừa in hỏng vừa in hết dòng trong 01 ngày'] = np.where(
-    (mix['Số lần in hỏng'] > 0) & (mix['Số lần in hết dòng'] > 0),
-    'X', ''
-)
-
-# Merge kết quả vào lại bảng chính
-df = pd.merge(
-    df,
-    mix[['ACC_NO', 'DATE_ONLY', 'TTK vừa in hỏng vừa in hết dòng trong 01 ngày']],
-    on=['ACC_NO', 'DATE_ONLY'],
-    how='left'
-)
-
-# Xoá cột ngày phụ
-df.drop(columns=['DATE_ONLY'], inplace=True)
-
-# Format lại cột ngày nếu cần
-df['INVT_TRAN_DATE'] = df['INVT_TRAN_DATE'].dt.strftime('%m/%d/%Y')
-
- return df
 
 
 
